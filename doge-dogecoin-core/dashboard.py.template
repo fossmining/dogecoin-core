@@ -1,0 +1,238 @@
+"""Small status dashboard for the Dogecoin Core Umbrel app (stdlib only)."""
+
+import base64
+import json
+import os
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+PORT = int(os.environ.get("PORT", "3000"))
+RPC_URL = "http://" + os.environ["RPC_HOST"] + ":" + os.environ["RPC_PORT"] + "/"
+RPC_USER = os.environ["RPC_USER"]
+RPC_PASS = os.environ["RPC_PASS"]
+AUTH = "Basic " + base64.b64encode((RPC_USER + ":" + RPC_PASS).encode()).decode()
+
+CONNECTION = {
+    "version": os.environ.get("APP_VERSION", ""),
+    "node_host": os.environ.get("NODE_HOST", ""),
+    "device": os.environ.get("DEVICE_DOMAIN_NAME", "umbrel.local"),
+    "rpc_port": os.environ.get("RPC_PORT", ""),
+    "p2p_port": os.environ.get("P2P_PORT", ""),
+    "rpc_user": RPC_USER,
+    "rpc_pass": RPC_PASS,
+    "zmq": {
+        "hashblock": os.environ.get("ZMQ_HASHBLOCK_PORT", ""),
+        "rawblock": os.environ.get("ZMQ_RAWBLOCK_PORT", ""),
+        "rawtx": os.environ.get("ZMQ_RAWTX_PORT", ""),
+    },
+}
+
+_cache = {"t": 0.0, "data": None}
+
+
+class RpcError(Exception):
+    pass
+
+
+def rpc(method, params=None):
+    body = json.dumps({"jsonrpc": "1.0", "id": "dash", "method": method, "params": params or []}).encode()
+    req = urllib.request.Request(RPC_URL, data=body, headers={"Authorization": AUTH, "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read())
+    except urllib.error.HTTPError as exc:
+        try:
+            payload = json.loads(exc.read())
+        except Exception:  # noqa: BLE001
+            raise RpcError("HTTP " + str(exc.code))
+    if payload.get("error"):
+        raise RpcError(payload["error"].get("message", "RPC error"))
+    return payload["result"]
+
+
+def status():
+    now = time.time()
+    if _cache["data"] is not None and now - _cache["t"] < 4:
+        return _cache["data"]
+    data = {"connection": CONNECTION}
+    try:
+        chain = rpc("getblockchaininfo")
+        net = rpc("getnetworkinfo")
+        mempool = rpc("getmempoolinfo")
+        peers = rpc("getpeerinfo")
+        try:
+            uptime = rpc("uptime")
+        except RpcError:
+            uptime = None  # not available in Dogecoin Core 1.14
+        inbound = sum(1 for p in peers if p.get("inbound"))
+        progress = float(chain.get("verificationprogress", 0) or 0)
+        synced = (not chain.get("initialblockdownload", True)) and chain.get("blocks") == chain.get("headers")
+        data.update({
+            "state": "synced" if synced else "syncing",
+            "chain": chain.get("chain"),
+            "blocks": chain.get("blocks"),
+            "headers": chain.get("headers"),
+            "progress": min(progress, 1.0),
+            "size_on_disk": chain.get("size_on_disk"),
+            "difficulty": chain.get("difficulty"),
+            "subversion": net.get("subversion"),
+            "connections": net.get("connections", len(peers)),
+            "inbound": inbound,
+            "outbound": len(peers) - inbound,
+            "mempool_txs": mempool.get("size"),
+            "mempool_bytes": mempool.get("bytes"),
+            "uptime": uptime,
+            "peers": [
+                {"addr": p.get("addr"), "subver": p.get("subver"), "inbound": p.get("inbound"), "height": p.get("synced_blocks")}
+                for p in peers[:25]
+            ],
+        })
+    except RpcError as exc:
+        data.update({"state": "starting", "message": str(exc)})
+    except Exception as exc:  # noqa: BLE001
+        data.update({"state": "starting", "message": "Waiting for dogecoind (" + exc.__class__.__name__ + ")"})
+    _cache.update(t=now, data=data)
+    return data
+
+
+def fmt_int(n):
+    return "{:,}".format(n) if isinstance(n, int) else "-"
+
+
+def widget_stats():
+    s = status()
+    size = s.get("size_on_disk")
+    mempool = s.get("mempool_txs")
+    return {
+        "type": "four-stats",
+        "refresh": "10s",
+        "link": "",
+        "items": [
+            {"title": "Block height", "text": fmt_int(s.get("blocks")), "subtext": ""},
+            {"title": "Peers", "text": str(s.get("connections", 0)), "subtext": "connected"},
+            {"title": "Mempool", "text": fmt_int(mempool) if mempool is not None else "-", "subtext": "txs"},
+            {"title": "Chain size", "text": str(round(size / 1e9)) if size else "-", "subtext": "GB"},
+        ],
+    }
+
+
+def widget_sync():
+    s = status()
+    progress = float(s.get("progress", 0) or 0)
+    state = s.get("state")
+    label = {"synced": "Synced", "syncing": "In progress"}.get(state, "Starting")
+    return {
+        "type": "text-with-progress",
+        "refresh": "10s",
+        "link": "",
+        "title": "Blockchain sync",
+        "text": str(int(progress * 1000) / 10.0) + "%",
+        "progressLabel": label,
+        "progress": progress,
+    }
+
+
+PAGE = r"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dogecoin Core</title>
+<style>
+:root{--bg:#0f0e0c;--card:#1b1915;--line:#2c2922;--fg:#f3efe6;--mut:#a39d8f;--acc:#c2a633;--ok:#5cb85c}
+@media (prefers-color-scheme: light){:root{--bg:#f7f4ec;--card:#fff;--line:#e6e0d2;--fg:#1c1a15;--mut:#6b6558;--acc:#a8901f}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,Segoe UI,sans-serif}
+main{max-width:960px;margin:0 auto;padding:24px 16px 48px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:20px}
+header h1{font-size:22px;margin:0}.badge{font-size:12px;padding:3px 10px;border-radius:99px;border:1px solid var(--line);color:var(--mut)}
+.badge.synced{color:var(--ok);border-color:var(--ok)}.badge.syncing{color:var(--acc);border-color:var(--acc)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.k{color:var(--mut);font-size:12px;text-transform:uppercase;letter-spacing:.06em}.v{font-size:24px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
+.bar{height:8px;background:var(--line);border-radius:99px;overflow:hidden;margin-top:10px}.bar>i{display:block;height:100%;background:var(--acc);width:0}
+h2{font-size:15px;margin:28px 0 10px}table{width:100%;border-collapse:collapse;font-size:13px}td,th{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;word-break:break-all}
+th{color:var(--mut);font-weight:500;width:38%}code{font:13px ui-monospace,SFMono-Regular,Menlo,monospace}
+button{background:none;border:1px solid var(--line);color:var(--fg);border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer;margin-left:6px}
+.msg{color:var(--mut);margin-top:8px;font-size:13px}
+</style></head><body><main>
+<header><svg width="36" height="36" viewBox="0 0 36 36" aria-hidden="true"><circle cx="18" cy="18" r="17" fill="#c2a633"/><text x="18" y="25" text-anchor="middle" font-size="20" font-weight="700" fill="#fff" font-family="system-ui">&#272;</text></svg>
+<h1>Dogecoin Core</h1><span id="state" class="badge">starting</span></header>
+<div class="card"><div class="k">Blockchain sync</div><div class="v" id="pct">-</div><div class="bar"><i id="barfill"></i></div><div class="msg" id="msg"></div></div>
+<div class="grid" style="margin-top:12px">
+<div class="card"><div class="k">Block height</div><div class="v" id="blocks">-</div></div>
+<div class="card"><div class="k">Peers</div><div class="v" id="peers">-</div></div>
+<div class="card"><div class="k">Mempool</div><div class="v" id="mempool">-</div></div>
+<div class="card"><div class="k">Chain size</div><div class="v" id="size">-</div></div>
+</div>
+<h2>Connect other apps</h2>
+<div class="card"><table id="conn"></table></div>
+<h2>Peers</h2>
+<div class="card"><table id="peertable"><tr><td class="msg">No peers yet</td></tr></table></div>
+<p class="msg">Version <span id="ver"></span><span id="upwrap" hidden> &middot; uptime <span id="uptime">-</span></span></p>
+</main>
+<script>
+var showPass=false,last=null;
+function n(x){return (x===null||x===undefined)?'-':Number(x).toLocaleString()}
+function esc(s){return String(s===undefined||s===null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
+function dur(s){if(!s)return '-';var d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return (d?d+'d ':'')+h+'h '+m+'m'}
+function row(k,v,copy){return '<tr><th>'+esc(k)+'</th><td><code>'+esc(v)+'</code>'+(copy?'<button data-c="'+esc(v)+'">copy</button>':'')+'</td></tr>'}
+function renderConn(c){
+ var pass=showPass?c.rpc_pass:'••••••••••••';
+ var h=row('RPC host (from Umbrel apps)',c.node_host,true)+row('RPC port',c.rpc_port,true)+row('RPC user',c.rpc_user,true)+
+ '<tr><th>RPC password</th><td><code>'+esc(pass)+'</code><button id="tog">'+(showPass?'hide':'show')+'</button><button data-c="'+esc(c.rpc_pass)+'">copy</button></td></tr>'+
+ row('ZMQ hashblock','tcp://'+c.node_host+':'+c.zmq.hashblock,true)+row('ZMQ rawblock','tcp://'+c.node_host+':'+c.zmq.rawblock,true)+
+ row('ZMQ rawtx','tcp://'+c.node_host+':'+c.zmq.rawtx,true)+row('P2P (inbound peers)',c.device+':'+c.p2p_port,true);
+ document.getElementById('conn').innerHTML=h;
+ document.getElementById('tog').onclick=function(){showPass=!showPass;renderConn(c)};
+}
+document.addEventListener('click',function(e){var v=e.target.getAttribute&&e.target.getAttribute('data-c');if(v!==null&&v!==undefined&&navigator.clipboard){navigator.clipboard.writeText(v);e.target.textContent='copied';setTimeout(function(){e.target.textContent='copy'},1200)}});
+function render(s){
+ var st=document.getElementById('state');st.textContent=s.state;st.className='badge '+s.state;
+ var p=s.progress||0;document.getElementById('pct').textContent=(s.state==='starting')?'Starting…':(Math.floor(p*1000)/10)+'%';
+ document.getElementById('barfill').style.width=(p*100)+'%';
+ document.getElementById('msg').textContent=s.message?s.message:(s.headers?('Block '+n(s.blocks)+' of '+n(s.headers)+' headers'):'');
+ document.getElementById('blocks').textContent=n(s.blocks);
+ document.getElementById('peers').textContent=s.connections===undefined?'-':s.connections+' ('+s.inbound+' in / '+s.outbound+' out)';
+ document.getElementById('mempool').textContent=s.mempool_txs===undefined?'-':n(s.mempool_txs)+' txs';
+ document.getElementById('size').textContent=s.size_on_disk?(s.size_on_disk/1e9).toFixed(1)+' GB':'-';
+ document.getElementById('ver').textContent=(s.subversion||('v'+s.connection.version));
+ if(s.uptime){document.getElementById('upwrap').hidden=false;document.getElementById('uptime').textContent=dur(s.uptime)}
+ if(!last){renderConn(s.connection)}
+ var pt=document.getElementById('peertable');
+ if(s.peers&&s.peers.length){pt.innerHTML='<tr><th>Address</th><td><b>Client · direction</b></td></tr>'+s.peers.map(function(p){return '<tr><th><code>'+esc(p.addr)+'</code></th><td>'+esc(p.subver)+' · '+(p.inbound?'inbound':'outbound')+'</td></tr>'}).join('')}
+ last=s;
+}
+function tick(){fetch('api/status').then(function(r){return r.json()}).then(render).catch(function(){}).then(function(){setTimeout(tick,5000)})}
+tick();
+</script></body></html>"""
+
+
+class Handler(BaseHTTPRequestHandler):
+    def _send(self, code, body, ctype):
+        raw = body if isinstance(body, bytes) else body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_GET(self):  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        if path in ("/", "/index.html"):
+            self._send(200, PAGE, "text/html; charset=utf-8")
+        elif path == "/api/status":
+            self._send(200, json.dumps(status()), "application/json")
+        elif path == "/api/widget/stats":
+            self._send(200, json.dumps(widget_stats()), "application/json")
+        elif path == "/api/widget/sync":
+            self._send(200, json.dumps(widget_sync()), "application/json")
+        else:
+            self._send(404, "not found", "text/plain")
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+if __name__ == "__main__":
+    print("Dogecoin dashboard listening on :" + str(PORT), flush=True)
+    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
