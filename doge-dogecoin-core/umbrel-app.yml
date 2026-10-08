@@ -1,0 +1,87 @@
+manifestVersion: 1
+id: doge-dogecoin-core
+storage:
+  dataRoot: data
+category: crypto
+name: Dogecoin Core
+version: "1.14.9"
+tagline: Run your own Dogecoin full node
+icon: https://raw.githubusercontent.com/dogecoin/dogecoin/master/share/pixmaps/dogecoin256.png
+description: >-
+  Run your own Dogecoin full node with the official Dogecoin Core 1.14.9
+  release. Your node independently validates every block and transaction on
+  the Dogecoin network.
+
+
+  On first start the app downloads the official Dogecoin Core release from
+  github.com/dogecoin/dogecoin and refuses to run it unless its SHA-256
+  checksum matches the signed release checksums, so the node always runs the
+  unmodified upstream binaries.
+
+
+  The included dashboard shows sync progress, block height, peers, mempool
+  and the RPC and ZMQ details other apps on your Umbrel can use to connect.
+
+
+  Initial sync downloads the full Dogecoin blockchain (well over 100 GB) and
+  can take a day or more. An SSD is strongly recommended. Forward TCP port
+  22556 on your router if you want inbound peers.
+releaseNotes: ""
+
+developer: Dogecoin Core developers
+website: https://dogecoin.com
+dependencies: []
+repo: https://github.com/dogecoin/dogecoin
+support: https://github.com/dogecoin/dogecoin/issues
+
+port: 22580
+gallery: []
+path: ""
+
+defaultUsername: ""
+defaultPassword: ""
+
+widgets:
+  - id: "stats"
+    type: "four-stats"
+    refresh: "10s"
+    endpoint: "web:3000/api/widget/stats"
+    link: ""
+    example:
+      type: "four-stats"
+      link: ""
+      items:
+        - title: "Block height"
+          text: "5,900,000"
+          subtext: ""
+        - title: "Peers"
+          text: "12"
+          subtext: "connected"
+        - title: "Mempool"
+          text: "143"
+          subtext: "txs"
+        - title: "Chain size"
+          text: "120"
+          subtext: "GB"
+  - id: "sync"
+    type: "text-with-progress"
+    refresh: "10s"
+    endpoint: "web:3000/api/widget/sync"
+    link: ""
+    example:
+      type: "text-with-progress"
+      link: ""
+      title: "Blockchain sync"
+      text: "83%"
+      progressLabel: "In progress"
+      progress: 0.83
+
+backupIgnore:
+  - "data/bin/*"
+  - "data/dogecoin/blocks/*"
+  - "data/dogecoin/chainstate/*"
+  - "data/dogecoin/database/*"
+  - "data/dogecoin/debug.log"
+
+submitter: satsondefi
+submission: ""
