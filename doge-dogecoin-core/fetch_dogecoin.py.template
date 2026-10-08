@@ -1,0 +1,121 @@
+"""Install the official Dogecoin Core release into /opt/dogecoin/<version>.
+
+The tarball is downloaded from the official GitHub release and installed only
+if its SHA-256 matches the checksum pinned below, copied from the PGP-signed
+SHA256SUMS.asc published with the release.
+"""
+
+import hashlib
+import os
+import platform
+import shutil
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.request
+
+VERSION = os.environ.get("DOGECOIN_VERSION", "1.14.9")
+
+CHECKSUMS = {
+    "1.14.9": {
+        "x86_64": (
+            "dogecoin-1.14.9-x86_64-linux-gnu.tar.gz",
+            "4f227117b411a7c98622c970986e27bcfc3f547a72bef65e7d9e82989175d4f8",
+        ),
+        "aarch64": (
+            "dogecoin-1.14.9-aarch64-linux-gnu.tar.gz",
+            "6928c895a20d0bcb6d5c7dcec753d35c884a471aaf8ad4242a89a96acb4f2985",
+        ),
+    },
+}
+
+BINARIES = ("dogecoind", "dogecoin-cli", "dogecoin-tx")
+ROOT = "/opt/dogecoin"
+
+
+def log(msg):
+    print("[fetch] " + msg, flush=True)
+
+
+def main():
+    arch = platform.machine()
+    if arch in ("amd64",):
+        arch = "x86_64"
+    if arch in ("arm64",):
+        arch = "aarch64"
+
+    release = CHECKSUMS.get(VERSION, {})
+    if arch not in release:
+        log("Unsupported version/architecture: " + VERSION + " / " + arch)
+        return 1
+
+    filename, expected = release[arch]
+    target = os.path.join(ROOT, VERSION)
+    marker = os.path.join(target, ".sha256")
+
+    try:
+        with open(marker) as fh:
+            if fh.read().strip() == expected and all(
+                os.access(os.path.join(target, "bin", b), os.X_OK) for b in BINARIES
+            ):
+                log("Dogecoin Core " + VERSION + " (" + arch + ") already installed")
+                return 0
+    except OSError:
+        pass
+
+    url = (
+        "https://github.com/dogecoin/dogecoin/releases/download/v"
+        + VERSION + "/" + filename
+    )
+
+    with tempfile.TemporaryDirectory(dir=ROOT) as tmp:
+        tarball = os.path.join(tmp, filename)
+        for attempt in range(1, 6):
+            try:
+                log("Downloading " + url + " (attempt " + str(attempt) + ")")
+                req = urllib.request.Request(url, headers={"User-Agent": "umbrel-dogecoin"})
+                with urllib.request.urlopen(req, timeout=120) as resp, open(tarball, "wb") as out:
+                    shutil.copyfileobj(resp, out, 1024 * 1024)
+                break
+            except Exception as exc:  # noqa: BLE001
+                log("Download failed: " + repr(exc))
+                if attempt == 5:
+                    return 1
+                time.sleep(10 * attempt)
+
+        digest = hashlib.sha256()
+        with open(tarball, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        actual = digest.hexdigest()
+        if actual != expected:
+            log("CHECKSUM MISMATCH: expected " + expected + " got " + actual)
+            log("Refusing to install. The download may be corrupt or tampered with.")
+            return 1
+        log("Checksum OK: " + actual)
+
+        staging = os.path.join(tmp, "staging")
+        os.makedirs(os.path.join(staging, "bin"))
+        prefix = "dogecoin-" + VERSION + "/bin/"
+        with tarfile.open(tarball, "r:gz") as tar:
+            for name in BINARIES:
+                member = tar.getmember(prefix + name)
+                src = tar.extractfile(member)
+                dest = os.path.join(staging, "bin", name)
+                with open(dest, "wb") as out:
+                    shutil.copyfileobj(src, out)
+                os.chmod(dest, 0o755)
+        with open(os.path.join(staging, ".sha256"), "w") as fh:
+            fh.write(expected + "\n")
+
+        if os.path.exists(target):
+            shutil.rmtree(target)
+        os.rename(staging, target)
+
+    log("Installed Dogecoin Core " + VERSION + " (" + arch + ") to " + target)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
